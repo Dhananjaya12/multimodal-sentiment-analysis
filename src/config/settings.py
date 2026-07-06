@@ -36,11 +36,11 @@ TEXT_MODEL_CONFIG = {
 
 FUSION_MODEL_CONFIG = {
     "checkpoint_filename": "fusion_transformer.pt",
-    "hidden_dim": 256,
+    "hidden_dim": 128,
     "num_heads": 4,
-    "num_layers": 2,
-    "dropout": 0.1,
-    "learning_rate": 2e-4,
+    "num_layers": 1,
+    "dropout": 0.35,
+    "learning_rate": 1e-4,
     "modality_weights": {"text": 0.3, "audio": 0.35, "vision": 0.35},
 }
 

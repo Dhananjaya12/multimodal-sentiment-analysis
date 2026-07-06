@@ -21,6 +21,10 @@ def train_fusion_head(
     batch_size: int,
     validation_split: float,
     seed: int,
+    weight_decay: float,
+    patience: int,
+    min_delta: float,
+    max_grad_norm: float,
 ):
     dataset = torch.load(dataset_path, map_location="cpu")
     features = dataset["features"]
@@ -35,7 +39,9 @@ def train_fusion_head(
         dropout=FUSION_MODEL_CONFIG["dropout"],
     )
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=FUSION_MODEL_CONFIG["learning_rate"]
+        model.parameters(),
+        lr=FUSION_MODEL_CONFIG["learning_rate"],
+        weight_decay=weight_decay,
     )
 
     tensors = [features[name].float() for name in input_dims]
@@ -57,8 +63,12 @@ def train_fusion_head(
 
     best_val_f1 = -1.0
     best_metrics = {}
+    epochs_without_improvement = 0
+
     for epoch in range(epochs):
-        train_loss = _run_epoch(model, train_loader, optimizer, input_dims)
+        train_loss = _run_epoch(
+            model, train_loader, optimizer, input_dims, max_grad_norm
+        )
         val_metrics = evaluate(model, val_loader, input_dims)
         print(
             "epoch={epoch} train_loss={loss:.4f} val_loss={val_loss:.4f} "
@@ -69,10 +79,22 @@ def train_fusion_head(
             )
         )
 
-        if val_metrics["macro_f1"] > best_val_f1:
+        improved = val_metrics["macro_f1"] > best_val_f1 + min_delta
+        if improved:
             best_val_f1 = val_metrics["macro_f1"]
-            best_metrics = val_metrics
+            best_metrics = {**val_metrics, "best_epoch": epoch + 1}
             _save_checkpoint(model, output_path, input_dims, best_metrics)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        if epochs_without_improvement >= patience:
+            print(
+                f"early_stopping_epoch={epoch + 1} "
+                f"best_epoch={best_metrics.get('best_epoch')} "
+                f"best_val_macro_f1={best_val_f1:.4f}"
+            )
+            break
 
     if test_loader is not None:
         checkpoint = torch.load(output_path, map_location="cpu")
@@ -85,7 +107,9 @@ def train_fusion_head(
     print(f"saved_metrics={metrics_path}")
 
 
-def _run_epoch(model, loader, optimizer, input_dims: Dict[str, int]) -> float:
+def _run_epoch(
+    model, loader, optimizer, input_dims: Dict[str, int], max_grad_norm: float
+) -> float:
     model.train()
     total_loss = 0.0
     for batch in loader:
@@ -97,8 +121,10 @@ def _run_epoch(model, loader, optimizer, input_dims: Dict[str, int]) -> float:
         loss = F.cross_entropy(outputs["logits"], batch_labels)
         optimizer.zero_grad()
         loss.backward()
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
-        total_loss += float(loss)
+        total_loss += float(loss.detach())
     return total_loss / max(len(loader), 1)
 
 
@@ -115,7 +141,7 @@ def evaluate(model, loader, input_dims: Dict[str, int]) -> Dict[str, float]:
             batch_labels = batch[-1]
             outputs = model(batch_features)
             loss = F.cross_entropy(outputs["logits"], batch_labels)
-            total_loss += float(loss)
+            total_loss += float(loss.detach())
             predictions.extend(torch.argmax(outputs["logits"], dim=-1).tolist())
             targets.extend(batch_labels.tolist())
 
@@ -195,6 +221,7 @@ def _save_checkpoint(model, output_path: Path, input_dims: Dict[str, int], metri
             "hidden_dim": FUSION_MODEL_CONFIG["hidden_dim"],
             "num_heads": FUSION_MODEL_CONFIG["num_heads"],
             "num_layers": FUSION_MODEL_CONFIG["num_layers"],
+            "dropout": FUSION_MODEL_CONFIG["dropout"],
             "metrics": metrics,
         },
         output_path,
@@ -209,10 +236,14 @@ def main():
         type=Path,
         default=MODELS_DIR / FUSION_MODEL_CONFIG["checkpoint_filename"],
     )
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--validation-split", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument("--patience", type=int, default=4)
+    parser.add_argument("--min-delta", type=float, default=0.002)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
     args = parser.parse_args()
     train_fusion_head(
         args.dataset,
@@ -221,6 +252,10 @@ def main():
         args.batch_size,
         args.validation_split,
         args.seed,
+        args.weight_decay,
+        args.patience,
+        args.min_delta,
+        args.max_grad_norm,
     )
 
 

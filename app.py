@@ -664,6 +664,11 @@ def render_fused_model_page():
                 st.caption(f"Fusion method: {fusion_metadata.get('fusion_method', 'Feature Fusion')}")
                 if not fusion_metadata.get("trained_checkpoint", False):
                     st.info("No trained fusion checkpoint found yet. Using the Transformer-ready feature-fusion baseline.")
+                if fusion_metadata.get("probabilities"):
+                    st.markdown("### Fusion Probabilities")
+                    st.dataframe(pd.DataFrame([fusion_metadata["probabilities"]]), use_container_width=True)
+                if fusion_metadata.get("checkpoint_metrics"):
+                    st.caption(f"Checkpoint metrics: {fusion_metadata['checkpoint_metrics']}")
                 if fusion_metadata.get("attention_summary"):
                     st.markdown("### Modality Influence")
                     st.dataframe(pd.DataFrame([fusion_metadata["attention_summary"]]), use_container_width=True)
@@ -996,6 +1001,11 @@ def render_max_fusion_page():
                     st.caption(f"Fusion method: {fusion_metadata.get('fusion_method', 'Feature Fusion')}")
                     if not fusion_metadata.get("trained_checkpoint", False):
                         st.info("No trained fusion checkpoint found yet. Using the Transformer-ready feature-fusion baseline.")
+                    if fusion_metadata.get("probabilities"):
+                        st.markdown("### Fusion Probabilities")
+                        st.dataframe(pd.DataFrame([fusion_metadata["probabilities"]]), use_container_width=True)
+                    if fusion_metadata.get("checkpoint_metrics"):
+                        st.caption(f"Checkpoint metrics: {fusion_metadata['checkpoint_metrics']}")
                     if fusion_metadata.get("attention_summary"):
                         st.markdown("### Modality Influence")
                         st.dataframe(pd.DataFrame([fusion_metadata["attention_summary"]]), use_container_width=True)

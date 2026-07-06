@@ -62,7 +62,8 @@ def build_dataset(manifest: Path, output: Path, root: Optional[Path] = None):
                 "sentiment_score": row.get("sentiment_score", ""),
             }
         )
-        print(f"processed_row={index} label={label}")
+        if index % 100 == 0 or index == len(rows):
+            print(f"processed_rows={index}/{len(rows)}")
 
     feature_tensors = {
         name: _stack_features(values, DEFAULT_DIMS[name])

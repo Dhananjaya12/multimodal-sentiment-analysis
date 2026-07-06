@@ -1,10 +1,10 @@
 """
-Feature-level multimodal fusion built around a Transformer fusion module.
+Feature-level multimodal fusion built around a trained Transformer fusion module.
 
-This module keeps the app usable before a fusion checkpoint is trained. When a
-checkpoint exists, the classifier output is used. Otherwise, it extracts feature
-vectors and computes a calibrated feature-fusion baseline from modality
-confidence distributions.
+When models/fusion_transformer.pt exists, inference uses that trained checkpoint.
+Missing modalities are represented with zero vectors, matching the training and
+ablation setup used for CMU-MOSI. If the checkpoint is missing or fails to load,
+the app falls back to the older calibrated feature-fusion baseline.
 """
 
 import logging
@@ -87,12 +87,16 @@ def predict_transformer_fused_sentiment(
             return sentiment, confidence, metadata
         except Exception as exc:
             logger.exception("Fusion checkpoint inference failed: %s", exc)
+            fallback_error = str(exc)
+    else:
+        fallback_error = "Checkpoint not found"
 
     sentiment, confidence = _calibrated_feature_fusion(modality_scores)
     metadata = {
         "fusion_method": "Transformer-ready Feature Fusion Baseline",
         "trained_checkpoint": False,
         "checkpoint_path": str(checkpoint_path),
+        "checkpoint_error": fallback_error,
         "modalities": list(modality_features.keys()),
         "modality_scores": modality_scores,
         "attention_summary": _estimate_modality_influence(modality_features),
@@ -112,17 +116,21 @@ def _predict_with_checkpoint(
         hidden_dim=checkpoint.get("hidden_dim", FUSION_MODEL_CONFIG["hidden_dim"]),
         num_heads=checkpoint.get("num_heads", FUSION_MODEL_CONFIG["num_heads"]),
         num_layers=checkpoint.get("num_layers", FUSION_MODEL_CONFIG["num_layers"]),
-        dropout=FUSION_MODEL_CONFIG["dropout"],
+        dropout=checkpoint.get("dropout", FUSION_MODEL_CONFIG["dropout"]),
         num_classes=len(SENTIMENT_LABELS),
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    features = {
-        name: feature.embedding.reshape(1, -1)
-        for name, feature in modality_features.items()
-        if name in input_dims
-    }
+    features = {}
+    for name, expected_dim in input_dims.items():
+        if name in modality_features:
+            features[name] = _fit_feature_dim(
+                modality_features[name].embedding, expected_dim
+            ).reshape(1, -1)
+        else:
+            features[name] = torch.zeros(1, expected_dim, dtype=torch.float32)
+
     with torch.no_grad():
         outputs = model(features)
         probabilities = F.softmax(outputs["logits"], dim=-1).squeeze(0)
@@ -136,19 +144,36 @@ def _predict_with_checkpoint(
         )
     }
     return sentiment, float(confidence), {
-        "fusion_method": "Transformer Cross-Modal Fusion",
+        "fusion_method": "Trained Transformer Cross-Modal Fusion",
         "trained_checkpoint": True,
         "checkpoint_path": str(checkpoint_path),
-        "modalities": outputs["modalities"],
+        "checkpoint_metrics": checkpoint.get("metrics", {}),
+        "modalities": list(modality_features.keys()),
+        "model_modalities": outputs["modalities"],
         "attention_summary": attention,
+        "probabilities": {
+            SENTIMENT_LABELS[index]: float(value)
+            for index, value in enumerate(probabilities.tolist())
+        },
     }
+
+
+def _fit_feature_dim(feature: torch.Tensor, expected_dim: int) -> torch.Tensor:
+    feature = feature.detach().cpu().float().reshape(-1)
+    if feature.numel() > expected_dim:
+        return feature[:expected_dim]
+    if feature.numel() < expected_dim:
+        return F.pad(feature, (0, expected_dim - feature.numel()))
+    return feature
 
 
 def _score_distribution(sentiment: str, confidence: float) -> Dict[str, float]:
     three_way = to_three_way_sentiment(sentiment)
     confidence = max(0.0, min(float(confidence), 1.0))
     remaining = max(0.0, 1.0 - confidence)
-    scores = {label: remaining / (len(SENTIMENT_LABELS) - 1) for label in SENTIMENT_LABELS}
+    scores = {
+        label: remaining / (len(SENTIMENT_LABELS) - 1) for label in SENTIMENT_LABELS
+    }
     scores[three_way] = confidence
     return scores
 
@@ -177,8 +202,8 @@ def _estimate_modality_influence(
     modality_features: Dict[str, ModalityFeature]
 ) -> Dict[str, float]:
     raw_scores = {
-        name: max(0.001, feature.confidence) for name, feature in modality_features.items()
+        name: max(0.001, feature.confidence)
+        for name, feature in modality_features.items()
     }
     total = sum(raw_scores.values())
     return {name: round(score / total, 4) for name, score in raw_scores.items()}
-

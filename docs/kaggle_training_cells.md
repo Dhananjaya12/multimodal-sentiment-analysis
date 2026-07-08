@@ -64,8 +64,12 @@ This is the slow step. Use GPU runtime.
 !python -m src.training.train_fusion \
   --dataset "{FUSION_DATASET_PATH}" \
   --output "{CHECKPOINT_PATH}" \
-  --epochs 20 \
-  --batch-size 16
+  --epochs 30 \
+  --batch-size 16 \
+  --weight-decay 1e-3 \
+  --patience 4 \
+  --min-delta 0.002 \
+  --max-grad-norm 1.0
 ```
 
 ## Cell 6: Download Outputs

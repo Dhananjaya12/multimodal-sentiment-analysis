@@ -109,6 +109,76 @@ def media_to_path(value) -> Optional[Path]:
     return None
 
 
+
+def probe_video(video_path: Path) -> dict:
+    info = {
+        "path": str(video_path),
+        "exists": video_path.exists(),
+        "suffix": video_path.suffix,
+        "size_bytes": video_path.stat().st_size if video_path.exists() else 0,
+    }
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(video_path))
+        info["opencv_opened"] = bool(cap.isOpened())
+        info["opencv_frame_count"] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+        info["opencv_fps"] = float(cap.get(cv2.CAP_PROP_FPS)) if cap.isOpened() else 0.0
+        ok, frame = cap.read() if cap.isOpened() else (False, None)
+        info["opencv_first_frame"] = bool(ok)
+        info["opencv_first_frame_shape"] = tuple(frame.shape) if ok and frame is not None else None
+        cap.release()
+    except Exception as exc:
+        info["opencv_error"] = str(exc)
+
+    if shutil.which("ffprobe"):
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_streams", "-show_format",
+                    "-of", "json", str(video_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20,
+            )
+            info["ffprobe_returncode"] = result.returncode
+            info["ffprobe_stdout_head"] = result.stdout[:1000]
+            info["ffprobe_stderr"] = result.stderr[:1000]
+        except Exception as exc:
+            info["ffprobe_error"] = str(exc)
+    else:
+        info["ffprobe_missing"] = True
+
+    print(f"[VIDEO_PROBE] {info}", flush=True)
+    return info
+
+
+def convert_video_for_opencv(video_path: Path) -> Optional[Path]:
+    if not shutil.which("ffmpeg"):
+        print("[WARN] ffmpeg not available; cannot convert video for OpenCV", flush=True)
+        return None
+    temp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    temp.close()
+    out_path = Path(temp.name)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-an", "-vf", "fps=5,scale=224:224:force_original_aspect_ratio=increase,crop=224:224",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path),
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+    print(
+        f"[VIDEO_CONVERT] returncode={result.returncode} out={out_path} size={out_path.stat().st_size if out_path.exists() else 0} stderr={result.stderr[-1000:]}",
+        flush=True,
+    )
+    if result.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+        return out_path
+    try:
+        out_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return None
+
 def fit_dim(feature: Optional[torch.Tensor], expected_dim: int) -> torch.Tensor:
     if feature is None:
         return torch.zeros(1, expected_dim, dtype=torch.float32)
@@ -194,13 +264,23 @@ def result_html(label: str, confidence: float, probabilities: dict, modalities: 
     """
 
 
+def log_step(name: str, started: float, extra: str = ""):
+    elapsed = time.perf_counter() - started
+    suffix = f" | {extra}" if extra else ""
+    print(f"[TIMING] {name}: {elapsed:.3f}s{suffix}", flush=True)
+
+
 def analyze(video_value, audio_value, image_value, text, progress=gr.Progress()):
     started = time.perf_counter()
+    step_started = started
+    print("[TIMING] request_start", flush=True)
     text = (text or "").strip()
     notes = []
 
     try:
         model, checkpoint = load_model()
+        log_step("load_model", step_started)
+        step_started = time.perf_counter()
     except Exception as exc:
         return "", f'<div class="error-card">{html.escape(str(exc))}</div>'
 
@@ -214,11 +294,15 @@ def analyze(video_value, audio_value, image_value, text, progress=gr.Progress())
     video_path = media_to_path(video_value)
     audio_path = media_to_path(audio_value)
     image_path = media_to_path(image_value)
+    log_step("normalize_inputs", step_started, f"video={bool(video_path)} audio={bool(audio_path)} image={bool(image_path)} text={bool(text)}")
+    step_started = time.perf_counter()
 
     if video_path:
         progress(0.15, desc="Extracting video frames")
         try:
             vision_feature = extract_video_embedding(video_path, max_frames=5)
+            log_step("video_vision_embedding", step_started, str(video_path))
+            step_started = time.perf_counter()
             if vision_feature is not None:
                 modalities.append("vision")
             else:
@@ -228,6 +312,8 @@ def analyze(video_value, audio_value, image_value, text, progress=gr.Progress())
 
         progress(0.35, desc="Extracting video audio")
         extracted_audio = extract_audio_from_video(video_path)
+        log_step("video_audio_extract", step_started)
+        step_started = time.perf_counter()
         if extracted_audio is not None:
             audio_path = extracted_audio
             notes.append("Audio extracted from video.")
@@ -238,6 +324,8 @@ def analyze(video_value, audio_value, image_value, text, progress=gr.Progress())
         progress(0.35, desc="Extracting image features")
         try:
             vision_feature = extract_image_embedding(image_path)
+            log_step("image_vision_embedding", step_started, str(image_path))
+            step_started = time.perf_counter()
             if vision_feature is not None:
                 modalities.append("vision")
             else:
@@ -249,6 +337,8 @@ def analyze(video_value, audio_value, image_value, text, progress=gr.Progress())
         progress(0.55, desc="Extracting audio features")
         try:
             audio_feature = extract_audio_embedding(audio_path)
+            log_step("audio_embedding", step_started, str(audio_path))
+            step_started = time.perf_counter()
             if audio_feature is not None:
                 modalities.append("audio")
             else:
@@ -258,6 +348,8 @@ def analyze(video_value, audio_value, image_value, text, progress=gr.Progress())
 
         if not transcript:
             transcript = transcribe_audio(audio_path)
+            log_step("audio_transcription", step_started, f"transcript_found={bool(transcript)}")
+            step_started = time.perf_counter()
             if not transcript:
                 notes.append("Transcript was not detected, but audio features were still used.")
 
@@ -271,6 +363,8 @@ def analyze(video_value, audio_value, image_value, text, progress=gr.Progress())
         progress(0.70, desc="Extracting text features")
         try:
             text_feature = extract_text_embedding(transcript)
+            log_step("text_embedding", step_started)
+            step_started = time.perf_counter()
             if text_feature is not None:
                 modalities.append("text")
         except Exception as exc:
@@ -284,12 +378,16 @@ def analyze(video_value, audio_value, image_value, text, progress=gr.Progress())
         "audio": fit_dim(audio_feature, input_dims.get("audio", AUDIO_DIM)),
         "vision": fit_dim(vision_feature, input_dims.get("vision", VISION_DIM)),
     }
+    log_step("feature_padding", step_started, f"modalities={sorted(set(modalities))}")
+    step_started = time.perf_counter()
 
     progress(0.90, desc="Running trained fusion model")
     with torch.no_grad():
         output = model(features)
         probs_tensor = F.softmax(output["logits"], dim=-1).squeeze(0)
         confidence, predicted = torch.max(probs_tensor, dim=0)
+    log_step("fusion_inference", step_started)
+    log_step("request_total", started)
 
     label = LABELS[predicted.item()]
     probabilities = {LABELS[i]: float(probs_tensor[i]) for i in range(len(LABELS))}

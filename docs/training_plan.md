@@ -59,8 +59,10 @@ This extracts the features our fusion model needs:
 python -m src.training.train_fusion \
   --dataset data/cmu_mosi_fusion_dataset.pt \
   --output models/fusion_transformer.pt \
-  --epochs 20 \
-  --batch-size 16
+  --epochs 30 \
+  --batch-size 16 \
+  --weight-decay 1e-3 \
+  --patience 4
 ```
 
 The trainer uses CMU-MOSI's existing `train`, `valid`, and `test` splits when present.
